@@ -1,0 +1,124 @@
+import { useEffect, useState } from "react";
+import { auth, db, storage } from "../firebase";
+import { signInWithPopup, GoogleAuthProvider, signOut } from "firebase/auth";
+import { doc, getDoc, setDoc, collection, getDocs, addDoc, updateDoc, deleteDoc, onSnapshot, query, where } from "firebase/firestore";
+import { ref, uploadBytes, getDownloadURL, listAll } from "firebase/storage";
+import { useRouter } from "next/router";
+import { GaugeChart, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { format } from "date-fns";
+import { sendEmailReminder } from "../utils/emailService";
+import { generateInspectionPDF, sendInspectionEmail } from "../utils/pdfService";
+import { getMessaging, onMessage } from "firebase/messaging";
+import { exportDataAsCSV, exportDataAsExcel } from "../utils/exportService";
+import i18next from "i18next";
+import { useTranslation } from "react-i18next";
+import { openDB } from "idb";
+import { send2FACode, verify2FACode } from "../utils/2faService";
+import { sendNotification } from "../utils/notificationService";
+
+export default function Dashboard() {
+  const { t, i18n } = useTranslation();
+  const [user, setUser] = useState(null);
+  const [role, setRole] = useState(null);
+  const [is2FAVerified, setIs2FAVerified] = useState(false);
+  const [twoFACode, setTwoFACode] = useState("");
+  const [dashboardSettings, setDashboardSettings] = useState({ charts: true, tables: true });
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [inspectionStats, setInspectionStats] = useState([]);
+  const [reportData, setReportData] = useState([]);
+  const [reportSchedule, setReportSchedule] = useState("weekly");
+  const [approvalRequired, setApprovalRequired] = useState("none");
+  const [pendingInspections, setPendingInspections] = useState([]);
+  const [inspectionHistory, setInspectionHistory] = useState([]);
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [filterKeyword, setFilterKeyword] = useState("");
+  const [filterDate, setFilterDate] = useState("");
+  const [notificationPreferences, setNotificationPreferences] = useState({ email: true, inApp: true });
+  const [language, setLanguage] = useState("en");
+  const [systemLogs, setSystemLogs] = useState([]);
+  const [realTimeNotifications, setRealTimeNotifications] = useState([]);
+  const router = useRouter();
+
+  useEffect(() => {
+    const handleAuth = async () => {
+      auth.onAuthStateChanged(async (user) => {
+        if (user) {
+          setUser(user);
+          const userDoc = await getDoc(doc(db, "users", user.uid));
+          if (userDoc.exists()) {
+            setRole(userDoc.data().role);
+            setLanguage(userDoc.data().language || "en");
+            i18n.changeLanguage(userDoc.data().language || "en");
+            if (userDoc.data().twoFAEnabled) {
+              send2FACode(user.email);
+            } else {
+              setIs2FAVerified(true);
+            }
+            setNotificationPreferences(userDoc.data().notificationPreferences || { email: true, inApp: true });
+          } else {
+            await setDoc(doc(db, "users", user.uid), { role: "client", twoFAEnabled: false, language: "en", notificationPreferences: { email: true, inApp: true } });
+            setRole("client");
+            setIs2FAVerified(true);
+          }
+        } else {
+          setUser(null);
+          setRole(null);
+        }
+      });
+    };
+    handleAuth();
+  }, []);
+
+  useEffect(() => {
+    if (role === "admin") {
+      const fetchSystemLogs = async () => {
+        const logsSnapshot = await getDocs(collection(db, "system_logs"));
+        setSystemLogs(logsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      };
+      fetchSystemLogs();
+    }
+  }, [role]);
+
+  useEffect(() => {
+    if (user) {
+      const notificationsQuery = query(collection(db, "notifications"), where("recipient", "==", user.email));
+      const unsubscribe = onSnapshot(notificationsQuery, (snapshot) => {
+        setRealTimeNotifications(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      });
+      return () => unsubscribe();
+    }
+  }, [user]);
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
+      {user ? (
+        <div className="p-6 bg-white rounded-xl shadow-md w-full max-w-4xl">
+          <h1 className="text-xl font-semibold">{t('dashboard.title')}</h1>
+          <p className="text-gray-500">{t('dashboard.role')}: {role}</p>
+          
+          {realTimeNotifications.length > 0 && (
+            <div className="mt-6">
+              <h2 className="text-lg font-semibold">Real-Time Notifications</h2>
+              <ul>
+                {realTimeNotifications.map((notif) => (
+                  <li key={notif.id} className="border p-2 rounded-md mt-2">
+                    <span>{notif.message}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          
+          <button
+            onClick={() => signOut(auth)}
+            className="mt-4 px-4 py-2 bg-red-500 text-white rounded-md"
+          >
+            {t('dashboard.logout')}
+          </button>
+        </div>
+      ) : (
+        <p className="text-gray-500">{t('dashboard.loading')}</p>
+      )}
+    </div>
+  );
+}
